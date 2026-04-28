@@ -1,0 +1,13 @@
+shipment_id,route,carrier,origin,destination,shipment_date,planned_delivery_date,actual_delivery_date,delay_minutes,status
+SHP001,North-1,FastMove,Delhi,Jaipur,2026-03-02,2026-03-04,2026-03-05,180,delayed
+SHP002,North-1,FastMove,Delhi,Jaipur,2026-03-06,2026-03-08,2026-03-08,0,on_time
+SHP003,West-2,RapidHaul,Mumbai,Pune,2026-03-05,2026-03-06,2026-03-07,120,late
+SHP004,West-2,RapidHaul,Mumbai,Pune,2026-03-10,2026-03-12,2026-03-12,0,on_time
+SHP005,South-3,CargoPro,Bengaluru,Chennai,2026-03-11,2026-03-13,2026-03-14,90,delayed
+SHP006,South-3,CargoPro,Bengaluru,Chennai,2026-03-13,2026-03-15,2026-03-15,0,on_time
+SHP007,East-5,MoveMax,Kolkata,Bhubaneswar,2026-03-14,2026-03-16,2026-03-18,240,delayed
+SHP008,East-5,MoveMax,Kolkata,Bhubaneswar,2026-03-20,2026-03-22,2026-03-23,60,late
+SHP009,Central-8,ExpressWay,Nagpur,Indore,2026-03-18,2026-03-20,2026-03-20,0,on_time
+SHP010,Central-8,ExpressWay,Nagpur,Indore,2026-03-23,2026-03-25,2026-03-26,75,delayed
+SHP011,North-1,FastMove,Delhi,Jaipur,2026-04-03,2026-04-05,2026-04-06,95,delayed
+SHP012,West-2,RapidHaul,Mumbai,Pune,2026-04-06,2026-04-08,2026-04-08,0,on_time
