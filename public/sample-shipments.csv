@@ -5,7 +5,7 @@ SHP003,West-2,RapidHaul,Mumbai,Pune,2026-03-05,2026-03-06,2026-03-07,120,late
 SHP004,West-2,RapidHaul,Mumbai,Pune,2026-03-10,2026-03-12,2026-03-12,0,on_time
 SHP005,South-3,CargoPro,Bengaluru,Chennai,2026-03-11,2026-03-13,2026-03-14,90,delayed
 SHP006,South-3,CargoPro,Bengaluru,Chennai,2026-03-13,2026-03-15,2026-03-15,0,on_time
-SHP007,East-5,MoveMax,Kolkata,Bhubaneswar,2026-03-14,2026-03-16,2026-03-18,240,delayed
+SHP007,East-5,MoveMax,Kolkata,Bhubaneswar,2026-03-14,2026-03-16,2026-03-18,240,on_time
 SHP008,East-5,MoveMax,Kolkata,Bhubaneswar,2026-03-20,2026-03-22,2026-03-23,60,late
 SHP009,Central-8,ExpressWay,Nagpur,Indore,2026-03-18,2026-03-20,2026-03-20,0,on_time
 SHP010,Central-8,ExpressWay,Nagpur,Indore,2026-03-23,2026-03-25,2026-03-26,75,delayed
