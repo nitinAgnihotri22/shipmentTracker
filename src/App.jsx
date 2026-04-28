@@ -1,8 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
-import html2canvas from 'html2canvas'
-import jsPDF from 'jspdf'
-import autoTable from 'jspdf-autotable'
-import Papa from 'papaparse'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Bar,
   BarChart,
@@ -14,20 +10,8 @@ import {
 } from 'recharts'
 import './App.css'
 
-const MONTH_NAMES = [
-  'january',
-  'february',
-  'march',
-  'april',
-  'may',
-  'june',
-  'july',
-  'august',
-  'september',
-  'october',
-  'november',
-  'december',
-]
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
+const API_PREFIX = import.meta.env.VITE_API_PREFIX || '/api/v1'
 
 const QUICK_PROMPTS = [
   'Which routes had the most delays last month?',
@@ -36,384 +20,85 @@ const QUICK_PROMPTS = [
   'Create a table of delay count by route',
 ]
 
-const KEY_SYNONYMS = {
-  route: ['route', 'lane', 'shipping_lane', 'route_name'],
-  carrier: ['carrier', 'driver', 'transporter', 'vendor'],
-  destination: ['destination', 'destination_city', 'destination_hub', 'to_city'],
-  origin: ['origin', 'source', 'from_city', 'origin_hub'],
-  plannedDate: ['planned_delivery_date', 'eta', 'promised_date', 'expected_delivery_date'],
-  actualDate: ['actual_delivery_date', 'delivered_at', 'delivery_date'],
-  shipmentDate: ['shipment_date', 'pickup_date', 'dispatch_date', 'created_at'],
-  delayMinutes: ['delay_minutes', 'delay_mins', 'delay', 'late_by_minutes'],
-  status: ['status', 'shipment_status'],
+const SESSION_STORAGE_KEY = 'logistics_api_session'
+
+function getApiUrl(path) {
+  return `${API_BASE_URL}${path}`
 }
 
-const REQUIRED_FIELDS = ['shipment_id', 'route', 'carrier', 'origin', 'destination']
-
-const USERS_STORAGE_KEY = 'logistics_users'
-const SESSION_STORAGE_KEY = 'logistics_current_user'
-
-function parseDate(value) {
-  if (!value) {
-    return null
-  }
-
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) {
-    return null
-  }
-
-  return parsed
-}
-
-function minutesBetween(firstDate, secondDate) {
-  return Math.round((secondDate.getTime() - firstDate.getTime()) / 60000)
-}
-
-function findValueBySynonyms(row, synonyms) {
-  const normalizedKeys = Object.keys(row)
-  for (const candidateKey of synonyms) {
-    const direct = row[candidateKey]
-    if (direct !== undefined) {
-      return direct
-    }
-
-    const foundKey = normalizedKeys.find((key) => key.includes(candidateKey))
-    if (foundKey) {
-      return row[foundKey]
-    }
-  }
-  return undefined
-}
-
-function normalizeRow(rawRow) {
-  const normalized = {}
-  for (const [key, value] of Object.entries(rawRow)) {
-    if (!key) {
-      continue
-    }
-    normalized[key.trim().toLowerCase().replace(/\s+/g, '_')] = value
-  }
-  return normalized
-}
-
-function validateRowsForEmptyRequiredFields(rows) {
-  const rowErrors = []
-
-  rows.forEach((row, index) => {
-    const missing = REQUIRED_FIELDS.filter((field) => {
-      const value = row[field]
-      return value === undefined || `${value}`.trim() === ''
-    })
-
-    if (missing.length > 0) {
-      rowErrors.push(`Row ${index + 2}: missing ${missing.join(', ')}`)
-    }
-  })
-
-  return rowErrors
-}
-
-function addDerivedFields(rows) {
-  return rows.map((row) => {
-    const plannedDateRaw = findValueBySynonyms(row, KEY_SYNONYMS.plannedDate)
-    const actualDateRaw = findValueBySynonyms(row, KEY_SYNONYMS.actualDate)
-    const shipmentDateRaw = findValueBySynonyms(row, KEY_SYNONYMS.shipmentDate)
-    const delayRaw = findValueBySynonyms(row, KEY_SYNONYMS.delayMinutes)
-    const statusRaw = findValueBySynonyms(row, KEY_SYNONYMS.status)
-
-    const plannedDate = parseDate(plannedDateRaw)
-    const actualDate = parseDate(actualDateRaw)
-    const shipmentDate = parseDate(shipmentDateRaw)
-
-    let delayMinutes = Number(delayRaw)
-    if (Number.isNaN(delayMinutes)) {
-      delayMinutes = null
-    }
-    if (delayMinutes === null && plannedDate && actualDate) {
-      delayMinutes = minutesBetween(plannedDate, actualDate)
-    }
-
-    const status = typeof statusRaw === 'string' ? statusRaw.toLowerCase() : ''
-    const delayedByStatus = status.includes('delay') || status.includes('late')
-    const isDelayed = delayedByStatus || (delayMinutes !== null && delayMinutes > 0)
-
-    return {
-      ...row,
-      _plannedDate: plannedDate,
-      _actualDate: actualDate,
-      _shipmentDate: shipmentDate,
-      _delayMinutes: delayMinutes,
-      _isDelayed: isDelayed,
-      _status: status,
-    }
-  })
-}
-
-function findDimensionFromQuestion(questionText) {
-  if (questionText.includes('route')) return 'route'
-  if (questionText.includes('carrier') || questionText.includes('driver') || questionText.includes('vendor')) {
-    return 'carrier'
-  }
-  if (questionText.includes('destination') || questionText.includes('city') || questionText.includes('hub')) {
-    return 'destination'
-  }
-  if (questionText.includes('origin')) return 'origin'
-  return 'route'
-}
-
-function getDimensionValue(row, dimension) {
-  return findValueBySynonyms(row, KEY_SYNONYMS[dimension])?.toString().trim() || 'Unknown'
-}
-
-function getTimeWindow(questionText) {
-  const now = new Date()
-  const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1)
-
-  if (questionText.includes('last month')) {
-    const start = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-    const end = new Date(now.getFullYear(), now.getMonth(), 1)
-    return { label: 'last month', start, end }
-  }
-
-  if (questionText.includes('this month')) {
-    return { label: 'this month', start: startOfCurrentMonth, end: null }
-  }
-
-  const daysMatch = questionText.match(/last\s+(\d+)\s+days?/)
-  if (daysMatch) {
-    const numberOfDays = Number(daysMatch[1])
-    const start = new Date(now)
-    start.setDate(now.getDate() - numberOfDays)
-    return { label: `last ${numberOfDays} days`, start, end: null }
-  }
-
-  const monthMatch = MONTH_NAMES.find((monthName) => questionText.includes(monthName))
-  if (monthMatch) {
-    const monthIndex = MONTH_NAMES.indexOf(monthMatch)
-    const year = now.getFullYear()
-    const start = new Date(year, monthIndex, 1)
-    const end = new Date(year, monthIndex + 1, 1)
-    return { label: monthMatch, start, end }
-  }
-
-  return { label: 'all time', start: null, end: null }
-}
-
-function isDateWithinRange(date, windowRange) {
-  if (!date) {
-    return false
-  }
-  if (windowRange.start && date < windowRange.start) {
-    return false
-  }
-  if (windowRange.end && date >= windowRange.end) {
-    return false
-  }
-  return true
-}
-
-function getRelevantDate(row) {
-  return row._actualDate || row._plannedDate || row._shipmentDate
-}
-
-function aggregateData(rows, dimension, metric) {
-  const grouped = new Map()
-
-  rows.forEach((row) => {
-    const label = getDimensionValue(row, dimension)
-    const current = grouped.get(label) || {
-      label,
-      delayedCount: 0,
-      shipmentCount: 0,
-      totalDelayMinutes: 0,
-    }
-
-    current.shipmentCount += 1
-    if (row._isDelayed) {
-      current.delayedCount += 1
-    }
-    if (row._delayMinutes && row._delayMinutes > 0) {
-      current.totalDelayMinutes += row._delayMinutes
-    }
-
-    grouped.set(label, current)
-  })
-
-  return Array.from(grouped.values()).map((item) => {
-    if (metric === 'avg_delay') {
-      const averageDelay = item.shipmentCount === 0 ? 0 : item.totalDelayMinutes / item.shipmentCount
-      return {
-        label: item.label,
-        value: Number(averageDelay.toFixed(1)),
-      }
-    }
-
-    if (metric === 'delay_minutes') {
-      return {
-        label: item.label,
-        value: item.totalDelayMinutes,
-      }
-    }
-
-    if (metric === 'shipment_count') {
-      return {
-        label: item.label,
-        value: item.shipmentCount,
-      }
-    }
-
-    return {
-      label: item.label,
-      value: item.delayedCount,
-    }
-  })
-}
-
-function detectMetric(questionText) {
-  if (questionText.includes('average') || questionText.includes('avg')) return 'avg_delay'
-  if (questionText.includes('minutes') || questionText.includes('total delay')) return 'delay_minutes'
-  if (questionText.includes('shipments') || questionText.includes('volume')) return 'shipment_count'
-  return 'delay_count'
-}
-
-function getTopN(questionText) {
-  const topMatch = questionText.match(/top\s+(\d+)/)
-  if (topMatch) {
-    return Number(topMatch[1])
-  }
-  return 10
-}
-
-function getMetricLabel(metric) {
-  switch (metric) {
-    case 'avg_delay':
-      return 'Avg Delay (mins)'
-    case 'delay_minutes':
-      return 'Total Delay (mins)'
-    case 'shipment_count':
-      return 'Shipment Count'
-    default:
-      return 'Delay Count'
-  }
-}
-
-function createInsight(question, rows) {
-  const questionText = question.toLowerCase().trim()
-  if (!questionText) {
-    return {
-      error: 'Please enter a question to analyze the uploaded shipment data.',
-    }
-  }
-
-  if (!rows.length) {
-    return {
-      error: 'Upload a CSV file first. No shipment records are loaded yet.',
-    }
-  }
-
-  const timeWindow = getTimeWindow(questionText)
-  const filteredRows = rows.filter((row) => {
-    const relevantDate = getRelevantDate(row)
-    if (!timeWindow.start && !timeWindow.end) {
-      return true
-    }
-    return isDateWithinRange(relevantDate, timeWindow)
-  })
-
-  if (!filteredRows.length) {
-    return {
-      error: `No records found for ${timeWindow.label}. Try a broader date range.`,
-    }
-  }
-
-  const dimension = findDimensionFromQuestion(questionText)
-  const metric = detectMetric(questionText)
-  const topN = getTopN(questionText)
-  const metricLabel = getMetricLabel(metric)
-
-  const aggregatedRows = aggregateData(filteredRows, dimension, metric)
-    .sort((first, second) => second.value - first.value)
-    .slice(0, topN)
-
-  const wantsTable = questionText.includes('table') || questionText.includes('list')
-  const wantsChart = questionText.includes('chart') || questionText.includes('graph')
-
-  const topRow = aggregatedRows[0]
-  const narrative = topRow
-    ? `${topRow.label} has the highest ${metricLabel.toLowerCase()} (${topRow.value}) for ${timeWindow.label}.`
-    : `No grouped results found for ${timeWindow.label}.`
-
-  return {
-    title: `Insights by ${dimension}`,
-    metricLabel,
-    dimensionLabel: `${dimension[0].toUpperCase()}${dimension.slice(1)}`,
-    narrative,
-    filteredCount: filteredRows.length,
-    rows: aggregatedRows,
-    showTable: wantsTable || !wantsChart,
-    showChart: wantsChart || !wantsTable,
-  }
-}
-
-function getHistoryStorageKey(email) {
-  return `logistics_history_${email.toLowerCase()}`
-}
-
-function readUsersFromStorage() {
-  try {
-    const raw = localStorage.getItem(USERS_STORAGE_KEY)
-    const parsed = raw ? JSON.parse(raw) : []
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
-}
-
-function readSessionUser() {
+function readSessionFromStorage() {
   try {
     const raw = localStorage.getItem(SESSION_STORAGE_KEY)
-    return raw ? JSON.parse(raw) : null
-  } catch {
-    return null
-  }
-}
-
-function readHistoryForUser(email) {
-  if (!email) {
-    return []
-  }
-
-  try {
-    const key = getHistoryStorageKey(email)
-    const raw = localStorage.getItem(key)
-    const parsed = raw ? JSON.parse(raw) : []
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
-}
-
-function blobToDataUrl(blobData) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onloadend = () => resolve(reader.result)
-    reader.onerror = reject
-    reader.readAsDataURL(blobData)
-  })
-}
-
-async function getPdfHeaderLogoDataUrl() {
-  try {
-    const response = await fetch('/codebrew-black-logo.webp')
-    if (!response.ok) {
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed?.accessToken || !parsed?.refreshToken || !parsed?.user) {
       return null
     }
-    const logoBlob = await response.blob()
-    const logoDataUrl = await blobToDataUrl(logoBlob)
-    return typeof logoDataUrl === 'string' ? logoDataUrl : null
+    return parsed
   } catch {
     return null
+  }
+}
+
+function pickList(payload) {
+  if (Array.isArray(payload)) return payload
+  if (Array.isArray(payload?.items)) return payload.items
+  if (Array.isArray(payload?.rows)) return payload.rows
+  if (Array.isArray(payload?.records)) return payload.records
+  if (Array.isArray(payload?.data)) return payload.data
+  return []
+}
+
+function getErrorMessage(payload, fallbackMessage) {
+  const errorTextFromItem = (item) => {
+    if (!item) return ''
+    if (typeof item === 'string') return item
+    if (item.detail) return item.detail
+    if (item.message) return item.message
+    if (item.msg) return item.msg
+    if (item.constraints && typeof item.constraints === 'object') {
+      return Object.values(item.constraints).filter(Boolean).join(', ')
+    }
+    return ''
+  }
+
+  if (Array.isArray(payload?.errors) && payload.errors.length > 0) {
+    const combinedErrors = payload.errors
+      .map((item) => {
+        const reason = errorTextFromItem(item)
+        const field = item?.field || item?.path || item?.param
+        if (!reason) return ''
+        return field ? `${field}: ${reason}` : reason
+      })
+      .filter(Boolean)
+      .join(' | ')
+
+    if (combinedErrors) {
+      return combinedErrors
+    }
+  }
+
+  if (typeof payload?.error === 'string' && payload.error.trim()) {
+    return payload.error
+  }
+  if (payload?.message) return payload.message
+  return fallbackMessage
+}
+
+function normalizeInsight(rawData) {
+  const source = rawData?.result || rawData?.insight || rawData
+  if (!source || source.error) {
+    return { error: source?.error || 'No analysis result returned from server.' }
+  }
+  return {
+    title: source.title || 'Analysis Result',
+    metricLabel: source.metricLabel || 'Value',
+    dimensionLabel: source.dimensionLabel || 'Dimension',
+    narrative: source.narrative || 'Analysis completed.',
+    filteredCount: Number(source.filteredCount || 0),
+    rows: Array.isArray(source.rows) ? source.rows : [],
+    showTable: source.showTable ?? true,
+    showChart: source.showChart ?? true,
   }
 }
 
@@ -421,95 +106,180 @@ function App() {
   const [fileName, setFileName] = useState('')
   const [query, setQuery] = useState(QUICK_PROMPTS[0])
   const [rawRows, setRawRows] = useState([])
+  const [datasetColumns, setDatasetColumns] = useState([])
+  const [datasetId, setDatasetId] = useState('')
   const [uploadErrors, setUploadErrors] = useState([])
   const [insight, setInsight] = useState(null)
+  const [isUploading, setIsUploading] = useState(false)
+  const [isRunningAnalysis, setIsRunningAnalysis] = useState(false)
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false)
 
   const [authMode, setAuthMode] = useState('login')
   const [authError, setAuthError] = useState('')
   const [authForm, setAuthForm] = useState({ name: '', email: '', password: '' })
-  const [currentUser, setCurrentUser] = useState(() => readSessionUser())
-  const [historyItems, setHistoryItems] = useState(() => {
-    const sessionUser = readSessionUser()
-    return readHistoryForUser(sessionUser?.email)
-  })
-  const [activeHistoryId, setActiveHistoryId] = useState(null)
+  const [session, setSession] = useState(() => readSessionFromStorage())
+  const [historyItems, setHistoryItems] = useState([])
   const [isSidebarVisible, setIsSidebarVisible] = useState(true)
   const [isCsvPopupOpen, setIsCsvPopupOpen] = useState(false)
   const [isExportingReport, setIsExportingReport] = useState(false)
 
-  const chartExportRef = useRef(null)
-
-  const normalizedRows = useMemo(() => addDerivedFields(rawRows), [rawRows])
+  const currentUser = session?.user || null
   const columnNames = useMemo(() => {
-    if (!rawRows.length) {
-      return []
+    if (rawRows.length > 0) {
+      return Object.keys(rawRows[0])
     }
-    return Object.keys(rawRows[0])
-  }, [rawRows])
+    return Array.isArray(datasetColumns) ? datasetColumns : []
+  }, [datasetColumns, rawRows])
 
-  function persistHistory(nextHistory) {
-    setHistoryItems(nextHistory)
-    if (!currentUser?.email) {
+  function persistSession(nextSession) {
+    if (!nextSession) {
+      localStorage.removeItem(SESSION_STORAGE_KEY)
+      setSession(null)
       return
     }
-    localStorage.setItem(getHistoryStorageKey(currentUser.email), JSON.stringify(nextHistory))
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(nextSession))
+    setSession(nextSession)
   }
 
-  function addHistoryItem(entry) {
-    const historyEntry = {
-      id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      createdAt: new Date().toISOString(),
-      ...entry,
+  async function apiRequest(path, options = {}) {
+    const { token, body, isFormData = false, method = 'GET' } = options
+    const headers = {}
+    if (!isFormData) {
+      headers['Content-Type'] = 'application/json'
     }
-    const next = [historyEntry, ...historyItems].slice(0, 40)
-    persistHistory(next)
-    return historyEntry.id
-  }
-
-  function updateHistoryResult(historyId, result, questionText) {
-    if (!historyId) {
-      return
+    if (token) {
+      headers.Authorization = `Bearer ${token}`
     }
 
-    const next = historyItems.map((item) => {
-      if (item.id !== historyId) {
-        return item
-      }
-
-      return {
-        ...item,
-        question: questionText,
-        note: result.error ? result.error : result.narrative,
-        insight: sanitizeInsightForHistory(result),
-        updatedAt: new Date().toISOString(),
-      }
+    const response = await fetch(getApiUrl(path), {
+      method,
+      headers,
+      body: body ? (isFormData ? body : JSON.stringify(body)) : undefined,
     })
 
-    persistHistory(next)
+    const contentType = response.headers.get('content-type') || ''
+    const payload = contentType.includes('application/json') ? await response.json() : null
+    if (!response.ok) {
+      throw new Error(getErrorMessage(payload, `Request failed (${response.status})`))
+    }
+    return payload
   }
 
-  function sanitizeInsightForHistory(currentInsight) {
-    if (!currentInsight) {
-      return null
+  async function refreshAccessToken() {
+    if (!session?.refreshToken) {
+      throw new Error('Session expired. Please login again.')
     }
-
-    if (currentInsight.error) {
-      return { error: currentInsight.error }
+    const response = await apiRequest(`${API_PREFIX}/auth/refresh`, {
+      method: 'POST',
+      body: { refreshToken: session.refreshToken },
+    })
+    const data = response?.data || {}
+    const nextSession = {
+      user: data.user || session.user,
+      accessToken: data.accessToken || session.accessToken,
+      refreshToken: data.refreshToken || session.refreshToken,
     }
+    if (!nextSession.accessToken || !nextSession.refreshToken) {
+      throw new Error('Session refresh failed. Please login again.')
+    }
+    persistSession(nextSession)
+    return nextSession.accessToken
+  }
 
-    return {
-      title: currentInsight.title,
-      metricLabel: currentInsight.metricLabel,
-      dimensionLabel: currentInsight.dimensionLabel,
-      narrative: currentInsight.narrative,
-      filteredCount: currentInsight.filteredCount,
-      rows: Array.isArray(currentInsight.rows) ? currentInsight.rows.slice(0, 20) : [],
-      showTable: currentInsight.showTable,
-      showChart: currentInsight.showChart,
+  async function apiWithAuth(path, options = {}) {
+    try {
+      return await apiRequest(path, { ...options, token: session?.accessToken })
+    } catch (error) {
+      const message = `${error?.message || ''}`.toLowerCase()
+      if (!message.includes('401') && !message.includes('unauthorized')) {
+        throw error
+      }
+      const nextToken = await refreshAccessToken()
+      return apiRequest(path, { ...options, token: nextToken })
     }
   }
 
-  function handleAuthSubmit(event) {
+  async function loadHistories() {
+    if (!currentUser) return
+    setIsLoadingHistory(true)
+    try {
+      const [uploadsResponse, analysesResponse] = await Promise.all([
+        apiWithAuth(`${API_PREFIX}/history/uploads?page=1&limit=50`),
+        apiWithAuth(`${API_PREFIX}/history/analyses?page=1&limit=50`),
+      ])
+
+      const uploadItems = pickList(uploadsResponse?.data).map((item) => ({
+        id: `upload_${item.id || item.datasetId || Math.random().toString(36).slice(2, 8)}`,
+        recordId: item.id || '',
+        type: 'upload',
+        datasetId: item.datasetId || item.id || '',
+        fileName: item.fileName || item.name || 'Uploaded CSV',
+        question: '',
+        note: item.note || `Uploaded ${item.recordCount || 0} records`,
+        createdAt: item.createdAt || item.uploadedAt || new Date().toISOString(),
+      }))
+
+      const analysisItems = pickList(analysesResponse?.data).map((item) => ({
+        id: `analysis_${item.id || Math.random().toString(36).slice(2, 8)}`,
+        recordId: item.id || '',
+        type: 'analysis',
+        datasetId: item.datasetId || '',
+        fileName: item.fileName || 'Analysis',
+        question: item.query || item.question || '',
+        note: item.note || item.result?.narrative || item.insight?.narrative || 'Analysis completed',
+        createdAt: item.createdAt || new Date().toISOString(),
+        insight: item.result || item.insight || null,
+      }))
+
+      const merged = [...uploadItems, ...analysisItems].sort(
+        (first, second) => new Date(second.createdAt) - new Date(first.createdAt),
+      )
+      setHistoryItems(merged)
+    } catch (error) {
+      setAuthError(error.message || 'Failed to load history.')
+    } finally {
+      setIsLoadingHistory(false)
+    }
+  }
+
+  async function loadDatasetDetails(datasetIdentifier) {
+    if (!datasetIdentifier) {
+      return
+    }
+    const response = await apiWithAuth(`${API_PREFIX}/datasets/${datasetIdentifier}`)
+    const data = response?.data || {}
+    const rows = Array.isArray(data.rows) ? data.rows : Array.isArray(data.csvRows) ? data.csvRows : []
+    const columns = Array.isArray(data.columns)
+      ? data.columns
+      : rows.length > 0
+        ? Object.keys(rows[0])
+        : []
+
+    setDatasetId(datasetIdentifier)
+    setFileName(data.fileName || data.name || fileName)
+    setRawRows(rows)
+    setDatasetColumns(columns)
+    if (rows.length === 0) {
+      setUploadErrors([
+        'Dataset loaded, but row preview is not returned by this API. Upload endpoint still works correctly.',
+      ])
+    } else {
+      setUploadErrors([])
+    }
+  }
+
+  useEffect(() => {
+    if (currentUser) {
+      const timerId = window.setTimeout(() => {
+        loadHistories()
+      }, 0)
+      return () => window.clearTimeout(timerId)
+    }
+    return undefined
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser])
+
+  async function handleAuthSubmit(event) {
     event.preventDefault()
     setAuthError('')
 
@@ -517,71 +287,96 @@ function App() {
     const password = authForm.password
     const name = authForm.name.trim()
 
-    if (!email || !password || (authMode === 'signup' && !name)) {
+    if (!email || !password || (authMode === 'signup' && !name.trim())) {
       setAuthError('Please fill all required fields.')
       return
     }
 
-    const users = readUsersFromStorage()
+    const endpoint = authMode === 'signup' ? '/auth/signup' : '/auth/login'
+    const body =
+      authMode === 'signup' ? { name: name.trim(), email, password } : { email, password }
 
-    if (authMode === 'signup') {
-      const exists = users.some((user) => user.email === email)
-      if (exists) {
-        setAuthError('User already exists. Please login instead.')
-        return
+    try {
+      const response = await apiRequest(`${API_PREFIX}${endpoint}`, {
+        method: 'POST',
+        body,
+      })
+      const data = response?.data || {}
+      if (!data.accessToken || !data.refreshToken) {
+        throw new Error('Invalid auth response from server.')
       }
-
-      const newUser = { name, email, password }
-      const nextUsers = [...users, newUser]
-      localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(nextUsers))
-      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ name, email }))
-      setCurrentUser({ name, email })
-      setHistoryItems(readHistoryForUser(email))
-      return
+      const user = data.user || { name: name.trim() || 'User', email }
+      persistSession({
+        user,
+        accessToken: data.accessToken,
+        refreshToken: data.refreshToken,
+      })
+      setAuthForm({ name: '', email: '', password: '' })
+      setUploadErrors([])
+      setInsight(null)
+    } catch (error) {
+      setAuthError(error.message || 'Authentication failed.')
     }
-
-    const existingUser = users.find((user) => user.email === email && user.password === password)
-    if (!existingUser) {
-      setAuthError('Invalid email or password.')
-      return
-    }
-
-    localStorage.setItem(
-      SESSION_STORAGE_KEY,
-      JSON.stringify({ name: existingUser.name, email: existingUser.email }),
-    )
-    setCurrentUser({ name: existingUser.name, email: existingUser.email })
-    setHistoryItems(readHistoryForUser(existingUser.email))
   }
 
-  function handleLogout() {
+  async function handleLogout() {
     if (!window.confirm('Are you sure you want to logout?')) {
       return
     }
 
-    localStorage.removeItem(SESSION_STORAGE_KEY)
-    setCurrentUser(null)
+    try {
+      if (session?.accessToken && session?.refreshToken) {
+        await apiRequest(`${API_PREFIX}/auth/logout`, {
+          method: 'POST',
+          token: session.accessToken,
+          body: { refreshToken: session.refreshToken },
+        })
+      }
+    } catch {
+      // Ignore logout API failure and clear local session.
+    }
+
+    persistSession(null)
     setHistoryItems([])
-    setActiveHistoryId(null)
     setRawRows([])
+    setDatasetColumns([])
+    setDatasetId('')
     setInsight(null)
     setFileName('')
     setUploadErrors([])
   }
 
-  function handleClearHistory() {
-    if (!window.confirm('Clear all history for this account?')) {
+  async function handleClearHistory() {
+    if (!window.confirm('Clear all analysis history for this account?')) {
       return
     }
 
-    setHistoryItems([])
-    setActiveHistoryId(null)
-    if (currentUser?.email) {
-      localStorage.removeItem(getHistoryStorageKey(currentUser.email))
+    try {
+      let page = 1
+      let hasMore = true
+      while (hasMore) {
+        const response = await apiWithAuth(`${API_PREFIX}/history/analyses?page=${page}&limit=50`)
+        const records = pickList(response?.data)
+        if (records.length === 0) {
+          hasMore = false
+          break
+        }
+        await Promise.all(
+          records
+            .map((record) => record?.id)
+            .filter(Boolean)
+            .map((recordId) => apiWithAuth(`${API_PREFIX}/history/analyses/${recordId}`, { method: 'DELETE' })),
+        )
+        page += 1
+      }
+      await loadHistories()
+      setInsight(null)
+    } catch (error) {
+      setUploadErrors([error.message || 'Failed to clear history.'])
     }
   }
 
-  function handleFileUpload(event) {
+  async function handleFileUpload(event) {
     const file = event.target.files?.[0]
     if (!file) {
       return
@@ -594,6 +389,8 @@ function App() {
     if (!hasCsvName || !isCsvMimeType) {
       setFileName('')
       setRawRows([])
+      setDatasetColumns([])
+      setDatasetId('')
       setInsight(null)
       setUploadErrors(['Invalid file. Please upload a valid .csv file.'])
       return
@@ -602,160 +399,87 @@ function App() {
     setFileName(file.name)
     setUploadErrors([])
     setInsight(null)
+    setIsUploading(true)
 
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: (result) => {
-        const validationErrors = []
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('name', fileName.replace(/\.csv$/i, ''))
 
-        if (!Array.isArray(result.data) || result.data.length === 0) {
-          validationErrors.push('CSV file is empty or has no readable rows.')
-        }
-
-        if (result.errors.length > 0) {
-          validationErrors.push('Corrupted CSV detected: unable to parse some rows.')
-          result.errors.slice(0, 3).forEach((error) => {
-            validationErrors.push(`Parse error row ${error.row ?? '?'}: ${error.message}`)
-          })
-        }
-
-        const cleanedRows = (Array.isArray(result.data) ? result.data : [])
-          .filter((row) => Object.values(row).some((value) => `${value ?? ''}`.trim() !== ''))
-          .map(normalizeRow)
-
-        if (cleanedRows.length === 0) {
-          validationErrors.push('CSV has no usable data rows.')
-        }
-
-        const fieldErrors = validateRowsForEmptyRequiredFields(cleanedRows)
-        if (fieldErrors.length > 0) {
-          validationErrors.push('Some rows have empty required fields.')
-          validationErrors.push(...fieldErrors.slice(0, 8))
-          if (fieldErrors.length > 8) {
-            validationErrors.push(`...and ${fieldErrors.length - 8} more row validation errors.`)
-          }
-        }
-
-        if (validationErrors.length > 0) {
-          setRawRows([])
-          setUploadErrors(validationErrors)
-          return
-        }
-
-        setRawRows(cleanedRows)
-        setUploadErrors([])
-        const newHistoryId = addHistoryItem({
-          fileName: file.name,
-          question: '',
-          recordCount: cleanedRows.length,
-          note: `Uploaded ${cleanedRows.length} records`,
-          insight: null,
-          csvRows: cleanedRows,
-          csvColumns: Object.keys(cleanedRows[0] || {}),
-        })
-        setActiveHistoryId(newHistoryId)
-      },
-      error: () => {
-        setRawRows([])
-        setUploadErrors(['Failed to read file. Corrupted or unsupported CSV.'])
-      },
-    })
+      const response = await apiWithAuth(`${API_PREFIX}/datasets/upload`, {
+        method: 'POST',
+        isFormData: true,
+        body: formData,
+      })
+      const data = response?.data || {}
+      setDatasetId(data.id || data.datasetId || '')
+      setDatasetColumns(Array.isArray(data.columns) ? data.columns : [])
+      setRawRows(Array.isArray(data.rows) ? data.rows : [])
+      setUploadErrors(Array.isArray(data.validationErrors) ? data.validationErrors : [])
+      await loadHistories()
+    } catch (error) {
+      setRawRows([])
+      setDatasetColumns([])
+      setDatasetId('')
+      setUploadErrors([error.message || 'Failed to upload CSV.'])
+    } finally {
+      setIsUploading(false)
+    }
   }
 
-  function runAnalysis() {
-    const result = createInsight(query, normalizedRows)
-    setInsight(result)
-
-    updateHistoryResult(activeHistoryId, result, query)
-  }
-
-  async function exportReport() {
-    if (!insight || insight.error || !Array.isArray(insight.rows) || insight.rows.length === 0) {
-      window.alert('Run a valid analysis first, then export the report.')
+  async function runAnalysis() {
+    if (!datasetId) {
+      setInsight({ error: 'Upload a CSV first to get a dataset ID.' })
       return
     }
 
-    setIsExportingReport(true)
-
+    setIsRunningAnalysis(true)
     try {
-      const documentPdf = new jsPDF({ unit: 'pt', format: 'a4' })
-      const pageWidth = documentPdf.internal.pageSize.getWidth()
-      const pageHeight = documentPdf.internal.pageSize.getHeight()
-      const margin = 40
-      const contentWidth = pageWidth - margin * 2
-      let cursorY = margin
-
-      const logoDataUrl = await getPdfHeaderLogoDataUrl()
-      if (logoDataUrl) {
-        const logoWidth = 120
-        const logoHeight = 36
-        const logoX = (pageWidth - logoWidth) / 2
-        documentPdf.addImage(logoDataUrl, 'WEBP', logoX, cursorY, logoWidth, logoHeight)
-        cursorY += logoHeight + 14
-      }
-
-      documentPdf.setFontSize(16)
-      documentPdf.text(insight.title || 'Shipment Insights Report', margin, cursorY)
-      cursorY += 22
-
-      documentPdf.setFontSize(10)
-      const summaryLines = [
-        `File: ${fileName || 'N/A'}`,
-        `Question: ${query || 'N/A'}`,
-        `Generated: ${new Date().toLocaleString()}`,
-        `Analyzed Shipments: ${insight.filteredCount ?? 0}`,
-      ]
-      summaryLines.forEach((lineText) => {
-        documentPdf.text(lineText, margin, cursorY)
-        cursorY += 14
+      const response = await apiWithAuth(`${API_PREFIX}/analysis/run`, {
+        method: 'POST',
+        body: { query, datasetId },
       })
-      cursorY += 8
+      const data = response?.data || {}
+      setInsight(normalizeInsight(data))
+      await loadHistories()
+    } catch (error) {
+      setInsight({ error: error.message || 'Failed to run analysis.' })
+    } finally {
+      setIsRunningAnalysis(false)
+    }
+  }
 
-      if (insight.showChart && chartExportRef.current) {
-        const chartCanvas = await html2canvas(chartExportRef.current, {
-          backgroundColor: '#ffffff',
-          scale: 2,
-          useCORS: true,
-        })
+  async function exportReport() {
+    setIsExportingReport(true)
+    try {
+      const response = await fetch(getApiUrl(`${API_PREFIX}/reports/analysis.pdf`), {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${session?.accessToken || ''}`,
+        },
+      })
 
-        const chartImage = chartCanvas.toDataURL('image/png')
-        const imageWidth = contentWidth
-        const imageHeight = (chartCanvas.height * imageWidth) / chartCanvas.width
-
-        if (cursorY + imageHeight > pageHeight - margin) {
-          documentPdf.addPage()
-          cursorY = margin
-        }
-
-        documentPdf.text('Chart Snapshot', margin, cursorY)
-        cursorY += 12
-        documentPdf.addImage(chartImage, 'PNG', margin, cursorY, imageWidth, imageHeight)
-        cursorY += imageHeight + 14
+      if (!response.ok) {
+        throw new Error(`Report download failed (${response.status})`)
       }
 
-      const shouldAddTable = insight.showTable || !insight.showChart
-      if (shouldAddTable) {
-        autoTable(documentPdf, {
-          startY: Math.min(cursorY, pageHeight - margin),
-          head: [[insight.dimensionLabel, insight.metricLabel]],
-          body: insight.rows.map((row) => [row.label, row.value]),
-          margin: { left: margin, right: margin },
-          styles: { fontSize: 9, cellPadding: 5 },
-          headStyles: { fillColor: [37, 99, 235] },
-        })
-      }
-
-      const safeFileName = (fileName || 'shipment_report').replace(/[^a-zA-Z0-9_-]+/g, '_')
-      documentPdf.save(`${safeFileName}_report.pdf`)
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${(fileName || 'analysis').replace(/[^a-zA-Z0-9_-]+/g, '_')}_report.pdf`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.URL.revokeObjectURL(url)
     } catch {
-      window.alert('Failed to export PDF report. Please try again.')
+      window.alert('Failed to download analysis PDF report.')
     } finally {
       setIsExportingReport(false)
     }
   }
 
-  function loadHistoryResult(item) {
+  async function loadHistoryResult(item) {
     if (!item) {
       return
     }
@@ -768,24 +492,18 @@ function App() {
       setFileName(item.fileName)
     }
 
-    if (Array.isArray(item.csvRows) && item.csvRows.length > 0) {
-      setRawRows(item.csvRows)
-      setUploadErrors([])
-    } else {
-      setRawRows([])
-      setUploadErrors([
-        'Stored CSV rows are not available for this history item. Please upload the file again.',
-      ])
+    try {
+      if (item.datasetId) {
+        await loadDatasetDetails(item.datasetId)
+      }
+    } catch (error) {
+      setUploadErrors([error.message || 'Failed to load dataset details.'])
     }
 
-    setActiveHistoryId(item.id)
-
-    if (item.insight) {
-      setInsight(item.insight)
+    if (item.type === 'analysis') {
+      setInsight(normalizeInsight(item.insight))
     } else {
-      setInsight({
-        error: 'This file has no saved result yet. Upload it again and run analysis to view results.',
-      })
+      setInsight(null)
     }
   }
 
@@ -871,7 +589,10 @@ function App() {
               Clear History
             </button>
           </div>
-          {historyItems.length === 0 ? <p className="meta">No uploaded files yet.</p> : null}
+          {isLoadingHistory ? <p className="meta">Loading history...</p> : null}
+          {!isLoadingHistory && historyItems.length === 0 ? (
+            <p className="meta">No uploads or analyses yet.</p>
+          ) : null}
           <div className="history-list">
             {historyItems.map((item) => (
               <button
@@ -882,6 +603,7 @@ function App() {
               >
                 <p>{item.fileName || 'Uploaded CSV'}</p>
                 <small>{new Date(item.createdAt).toLocaleString()}</small>
+                <small>Type: {item.type}</small>
                 {item.question ? <small>Last question: {item.question}</small> : null}
               </button>
             ))}
@@ -930,6 +652,8 @@ function App() {
           <h2>1) Upload Shipment CSV</h2>
           <input type="file" accept=".csv" onChange={handleFileUpload} />
           {fileName ? <p className="meta">Loaded file: {fileName}</p> : null}
+          {datasetId ? <p className="meta">Dataset ID: {datasetId}</p> : null}
+          {isUploading ? <p className="meta">Uploading CSV...</p> : null}
           {rawRows.length > 0 ? (
             <div className="upload-actions-row">
               <p className="meta">
@@ -974,7 +698,7 @@ function App() {
               placeholder="Which routes had the most delays last month?"
             />
             <button type="button" onClick={runAnalysis}>
-              Run Analysis
+              {isRunningAnalysis ? 'Running...' : 'Run Analysis'}
             </button>
           </div>
         </section>
@@ -1003,7 +727,7 @@ function App() {
               </p>
 
               {insight.showChart ? (
-                <div className="chart-box" ref={chartExportRef}>
+                <div className="chart-box">
                   <ResponsiveContainer width="100%" height={340}>
                     <BarChart data={insight.rows} margin={{ top: 12, right: 12, bottom: 16, left: 8 }}>
                       <CartesianGrid strokeDasharray="3 3" />
@@ -1052,6 +776,9 @@ function App() {
             <code>planned_delivery_date</code>, <code>actual_delivery_date</code>,{' '}
             <code>delay_minutes</code>, <code>status</code>
           </p>
+          <p className="meta">
+            API base: <code>{API_BASE_URL}</code> | Prefix: <code>{API_PREFIX}</code>
+          </p>
         </section>
       </section>
 
@@ -1074,13 +801,19 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rawRows.map((row, index) => (
+                  {rawRows.length > 0 ? rawRows.map((row, index) => (
                     <tr key={`csv_row_${index + 1}`}>
                       {columnNames.map((columnName) => (
                         <td key={`${columnName}_${index + 1}`}>{row[columnName] || '-'}</td>
                       ))}
                     </tr>
-                  ))}
+                  )) : (
+                    <tr>
+                      <td colSpan={Math.max(columnNames.length, 1)}>
+                        Preview rows are not returned by the current dataset API response.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
