@@ -2,6 +2,40 @@
 
 ShipmentTracker is a React + Vite web app for logistics teams to upload shipment CSV files, ask natural-language questions, and generate delay insights as charts/tables with PDF export.
 
+## What the App Does
+
+- Lets managers sign up/login and analyze shipment data directly in the browser
+- Uploads and validates CSV shipment files
+- Accepts plain-English questions about delays and trends
+- Generates chart and table insights from uploaded data
+- Exports insight reports to PDF
+- Saves per-user analysis history in browser local storage
+
+## How the App Works
+
+1. User authenticates with a simple signup/login form (stored in browser storage).
+2. User uploads a CSV; the app parses and validates rows client-side.
+3. The app normalizes columns and derives helper values (dates, delay minutes, delayed status).
+4. It interprets the typed question to detect:
+   - analysis dimension (route, carrier, destination, origin)
+   - metric (delay count, average delay, total delay minutes, shipment count)
+   - time window (last month, this month, last N days, specific month)
+5. Data is grouped, sorted, and rendered as chart/table output with a narrative.
+6. User can export the current insight to PDF and reopen previous history items later.
+
+## Tech Stack and Tools
+
+- **Framework/UI:** React
+- **Bundler/Dev Server:** Vite
+- **Language:** JavaScript (ES modules)
+- **CSV Parsing:** PapaParse
+- **Charts:** Recharts
+- **PDF Export:** jsPDF + jspdf-autotable
+- **Chart Capture for PDF:** html2canvas
+- **Linting:** ESLint
+- **Storage:** Browser localStorage
+- **Package Manager:** npm
+
 ## Prerequisites
 
 - Node.js `20+` (recommended for Vite 8 compatibility)
